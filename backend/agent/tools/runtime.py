@@ -1,6 +1,7 @@
 # pyright: reportUnknownVariableType=false
 import asyncio
 import difflib
+from itertools import zip_longest
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from codegen.utils import extract_html_content
@@ -95,8 +96,72 @@ class AgentToolRuntime:
         )
 
     @staticmethod
+    def _generate_compact_diff(
+        old_content: str, new_content: str, path: str
+    ) -> Optional[Dict[str, Any]]:
+        """Generate a compact inline diff for small changes.
+
+        Returns None if the change is too large for compact representation.
+        """
+        old_lines = old_content.splitlines()
+        new_lines = new_content.splitlines()
+
+        matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
+        changed_pairs: List[
+            Tuple[str, int, List[str], int, List[str]]
+        ] = []
+        first_changed_line: Optional[int] = None
+
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal":
+                continue
+            if first_changed_line is None:
+                first_changed_line = j1 + 1
+            changed_pairs.append(
+                (tag, i1 + 1, old_lines[i1:i2], j1 + 1, new_lines[j1:j2])
+            )
+
+        if not changed_pairs:
+            return {"diff": "(no changes)", "firstChangedLine": None}
+
+        total_old_lines = sum(len(p[2]) for p in changed_pairs)
+        total_new_lines = sum(len(p[4]) for p in changed_pairs)
+        if len(changed_pairs) > 3 or total_old_lines > 4 or total_new_lines > 4:
+            return None  # Fall back to unified diff
+
+        parts = [f"File: {path}"]
+        for tag, old_start, old_seg, new_start, new_seg in changed_pairs:
+            if tag == "replace":
+                for i, (ol, nl) in enumerate(
+                    zip_longest(old_seg, new_seg, fillvalue="")
+                ):
+                    line_num = old_start + i
+                    parts.append(f'Line {line_num}: "{ol}" -> "{nl}"')
+            elif tag == "delete":
+                for i, ol in enumerate(old_seg):
+                    parts.append(f'Line {old_start + i}: deleted "{ol}"')
+            elif tag == "insert":
+                for i, nl in enumerate(new_seg):
+                    parts.append(f'Line {new_start + i}: inserted "{nl}"')
+
+        return {
+            "diff": "\n".join(parts),
+            "firstChangedLine": first_changed_line,
+        }
+
+    @staticmethod
     def _generate_diff(old_content: str, new_content: str, path: str) -> Dict[str, Any]:
-        """Generate a unified diff between old and new content."""
+        """Generate a diff between old and new content.
+
+        Uses a compact inline format for small changes, falling back to
+        unified diff for larger changes.
+        """
+        compact = AgentToolRuntime._generate_compact_diff(
+            old_content, new_content, path
+        )
+        if compact is not None:
+            return compact
+
         old_lines = old_content.splitlines(keepends=True)
         new_lines = new_content.splitlines(keepends=True)
         diff_lines = list(

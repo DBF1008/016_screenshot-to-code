@@ -37,10 +37,11 @@ def test_edit_file_returns_structured_result_with_diff() -> None:
     assert result.result["content"] == "Successfully edited file at index.html."
     assert set(result.result["details"].keys()) == {"diff", "firstChangedLine"}
     assert result.result["details"]["firstChangedLine"] == 1
-    assert "--- index.html" in result.result["details"]["diff"]
-    assert "+++ index.html" in result.result["details"]["diff"]
-    assert "-<div>before</div>" in result.result["details"]["diff"]
-    assert "+<div>after</div>" in result.result["details"]["diff"]
+    diff = result.result["details"]["diff"]
+    assert "index.html" in diff
+    assert "<div>before</div>" in diff
+    assert "<div>after</div>" in diff
+    assert "->" in diff
     assert result.summary["firstChangedLine"] == 1
     assert result.summary["diff"] == result.result["details"]["diff"]
 
@@ -66,7 +67,7 @@ async def test_execute_edit_file_uses_updated_result_shape() -> None:
     assert result.ok is True
     assert result.result["content"] == "Successfully edited file at index.html."
     assert set(result.result["details"].keys()) == {"diff", "firstChangedLine"}
-    assert "--- index.html" in result.result["details"]["diff"]
+    assert "->" in result.result["details"]["diff"]
 
 
 @pytest.mark.asyncio
@@ -110,3 +111,48 @@ async def test_save_assets_promotes_temporary_asset_id(
     )
     assert temp_asset.asset_id not in images[0]["public_url"]
     assert len(list(asset_dir.iterdir())) == 1
+
+
+def test_generate_compact_diff_single_line_change() -> None:
+    result = AgentToolRuntime._generate_diff(
+        "<p>old text</p>\n<div>keep</div>\n",
+        "<p>new text</p>\n<div>keep</div>\n",
+        "index.html",
+    )
+    assert "->" in result["diff"]
+    assert "old text" in result["diff"]
+    assert "new text" in result["diff"]
+    assert result["firstChangedLine"] == 1
+    # Should NOT contain unified diff markers
+    assert "---" not in result["diff"]
+    assert "+++" not in result["diff"]
+
+
+def test_generate_diff_falls_back_to_unified_for_large_changes() -> None:
+    old = "\n".join(f"<p>line {i}</p>" for i in range(20))
+    new = "\n".join(f"<p>changed {i}</p>" for i in range(20))
+    result = AgentToolRuntime._generate_diff(old, new, "index.html")
+    assert "---" in result["diff"]
+    assert "+++" in result["diff"]
+
+
+def test_generate_compact_diff_line_deletion() -> None:
+    result = AgentToolRuntime._generate_diff(
+        "<h1>Title</h1>\n<p>remove me</p>\n<footer>End</footer>\n",
+        "<h1>Title</h1>\n<footer>End</footer>\n",
+        "index.html",
+    )
+    assert 'deleted' in result["diff"]
+    assert "remove me" in result["diff"]
+    assert result["firstChangedLine"] is not None
+
+
+def test_generate_compact_diff_line_insertion() -> None:
+    result = AgentToolRuntime._generate_diff(
+        "<h1>Title</h1>\n<footer>End</footer>\n",
+        "<h1>Title</h1>\n<p>new line</p>\n<footer>End</footer>\n",
+        "index.html",
+    )
+    assert 'inserted' in result["diff"]
+    assert "new line" in result["diff"]
+    assert result["firstChangedLine"] is not None

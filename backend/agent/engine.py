@@ -88,14 +88,24 @@ class AgentEngine:
         max_chunks = 18
         min_step = 200
         step = max(min_step, total_len // max_chunks)
-        start = already_sent if already_sent > 0 else 0
+        prev_end = already_sent
 
-        for end in range(start + step, total_len, step):
-            await self._send("setCode", content[:end])
+        for end in range(already_sent + step, total_len, step):
+            if prev_end == 0:
+                await self._send("setCode", content[:end])
+            else:
+                await self._send("chunk", content[prev_end:end])
             self._mark_preview_length(tool_event_id, end)
+            prev_end = end
             await asyncio.sleep(0.01)
 
-        await self._send("setCode", content)
+        # Send remaining content
+        if prev_end == 0:
+            await self._send("setCode", content)
+        else:
+            remaining = content[prev_end:]
+            if remaining:
+                await self._send("chunk", remaining)
         self._mark_preview_length(tool_event_id, total_len)
 
     async def _handle_streamed_tool_delta(
@@ -142,8 +152,9 @@ class AgentEngine:
             await self._send("setCode", content)
             self._mark_preview_length(tool_event_id, len(content))
         elif len(content) - last_len >= 40:
+            delta = content[last_len:]
             streamed_lengths[tool_event_id] = len(content)
-            await self._send("setCode", content)
+            await self._send("chunk", delta)
             self._mark_preview_length(tool_event_id, len(content))
 
     async def _run_with_session(self, session: ProviderSession) -> str:
