@@ -12,6 +12,7 @@ from agent.providers.factory import create_provider_session
 from agent.state import AgentFileState, seed_file_state_from_messages
 from agent.tools import (
     AgentToolRuntime,
+    extract_completed_edits_from_args,
     extract_content_from_args,
     extract_path_from_args,
     summarize_text,
@@ -56,6 +57,7 @@ class AgentEngine:
             option_codes=option_codes,
         )
         self._tool_preview_lengths: Dict[str, int] = {}
+        self._edit_preview_applied_count: Dict[str, int] = {}
 
     def _next_event_id(self, prefix: str) -> str:
         return f"{prefix}-{self.variant_index}-{uuid.uuid4().hex[:8]}"
@@ -106,9 +108,13 @@ class AgentEngine:
     ) -> None:
         if event.type != "tool_call_delta":
             return
-        if event.tool_name != "create_file":
+        if event.tool_name not in ("create_file", "edit_file"):
             return
         if not event.tool_call_id:
+            return
+
+        if event.tool_name == "edit_file":
+            await self._handle_edit_file_delta(event, started_tool_ids)
             return
 
         content = extract_content_from_args(event.tool_arguments)
@@ -145,6 +151,51 @@ class AgentEngine:
             streamed_lengths[tool_event_id] = len(content)
             await self._send("setCode", content)
             self._mark_preview_length(tool_event_id, len(content))
+
+    async def _handle_edit_file_delta(
+        self,
+        event: StreamEvent,
+        started_tool_ids: set[str],
+    ) -> None:
+        tool_event_id = event.tool_call_id
+        if not tool_event_id:
+            return
+
+        if tool_event_id not in started_tool_ids:
+            await self._send(
+                "toolStart",
+                data={
+                    "name": "edit_file",
+                    "input": {"status": "streaming edits"},
+                },
+                event_id=tool_event_id,
+            )
+            started_tool_ids.add(tool_event_id)
+
+        if not self.file_state.content:
+            return
+
+        completed = extract_completed_edits_from_args(event.tool_arguments)
+        if not completed:
+            return
+
+        prev_count = self._edit_preview_applied_count.get(tool_event_id, 0)
+        if len(completed) <= prev_count:
+            return
+
+        preview = self.file_state.content
+        for edit in completed:
+            old_text = str(edit.get("old_text", ""))
+            new_text = str(edit.get("new_text", ""))
+            if not old_text or old_text not in preview:
+                continue
+            count = edit.get("count")
+            replace_count = 1 if count is None else (preview.count(old_text) if count < 0 else count)
+            preview = preview.replace(old_text, new_text, replace_count)
+
+        self._edit_preview_applied_count[tool_event_id] = len(completed)
+        await self._send("setCode", preview)
+        self._mark_preview_length(tool_event_id, len(preview))
 
     async def _run_with_session(self, session: ProviderSession) -> str:
         max_steps = 20
@@ -205,6 +256,13 @@ class AgentEngine:
                         await self._stream_code_preview(tool_event_id, content)
 
                 tool_result = await self.tool_runtime.execute(tool_call)
+
+                if tool_call.name == "edit_file" and tool_result.updated_content:
+                    self._edit_preview_applied_count.pop(tool_event_id, None)
+                    await self._stream_code_preview(
+                        tool_event_id, tool_result.updated_content
+                    )
+
                 if tool_result.updated_content:
                     await self._send("setCode", tool_result.updated_content)
 

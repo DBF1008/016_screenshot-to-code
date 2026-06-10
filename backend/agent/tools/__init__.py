@@ -1,5 +1,6 @@
 from agent.tools.definitions import canonical_tool_definitions
 from agent.tools.parsing import (
+    extract_completed_edits_from_args,
     extract_content_from_args,
     extract_path_from_args,
     parse_json_arguments,
@@ -19,6 +20,7 @@ __all__ = [
     "ToolCall",
     "ToolExecutionResult",
     "canonical_tool_definitions",
+    "extract_completed_edits_from_args",
     "extract_content_from_args",
     "extract_path_from_args",
     "parse_json_arguments",

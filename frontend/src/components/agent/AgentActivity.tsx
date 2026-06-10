@@ -219,6 +219,10 @@ function renderToolDetails(event: AgentEvent, variantCode?: string) {
         <CodePreviewBlock code={variantCode} isGenerating={event.status === "running"} />
       )}
 
+      {event.toolName === "edit_file" && !hasError && variantCode && (
+        <CodePreviewBlock code={variantCode} isGenerating={event.status === "running"} />
+      )}
+
       {event.toolName === "edit_file" && edits && !hasError && (
         <div className="space-y-2">
           {edits.map((edit, index) => (
@@ -601,7 +605,7 @@ function AgentActivity() {
           {stepsExpanded && (
             <div className="space-y-1">
               {stepEvents.map((event) => (
-                <AgentEventCard key={event.id} event={event} variantCode={event.toolName === "create_file" ? variantCode : undefined} />
+                <AgentEventCard key={event.id} event={event} variantCode={event.toolName === "create_file" || event.toolName === "edit_file" ? variantCode : undefined} />
               ))}
             </div>
           )}
@@ -630,7 +634,7 @@ function AgentActivity() {
               key={event.id}
               event={event}
               autoExpand={event.type === "assistant" && event.id === lastAssistantId}
-              variantCode={event.toolName === "create_file" ? variantCode : undefined}
+              variantCode={event.toolName === "create_file" || event.toolName === "edit_file" ? variantCode : undefined}
             />
           ))}
         </>
