@@ -187,6 +187,12 @@ class AgentEngine:
                 return await self._finalize_response(turn.assistant_text)
 
             executed_tool_calls: List[ExecutedToolCall] = []
+
+            # Snapshot file state so we can roll back if any edit_file fails.
+            snapshot_content = self.file_state.content
+            snapshot_path = self.file_state.path
+            has_edit_failure = False
+
             for tool_call in turn.tool_calls:
                 tool_event_id = tool_call.id or self._next_event_id("tool")
                 if tool_event_id not in started_tool_ids:
@@ -208,6 +214,9 @@ class AgentEngine:
                 if tool_result.updated_content:
                     await self._send("setCode", tool_result.updated_content)
 
+                if tool_call.name == "edit_file" and not tool_result.ok:
+                    has_edit_failure = True
+
                 await self._send(
                     "toolResult",
                     data={
@@ -220,6 +229,13 @@ class AgentEngine:
                 executed_tool_calls.append(
                     ExecutedToolCall(tool_call=tool_call, result=tool_result)
                 )
+
+            # Roll back file state if any edit_file call failed in this turn.
+            if has_edit_failure:
+                self.file_state.content = snapshot_content
+                self.file_state.path = snapshot_path
+                if snapshot_content:
+                    await self._send("setCode", snapshot_content)
 
             session.append_tool_results(turn, executed_tool_calls)
 
