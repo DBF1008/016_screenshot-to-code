@@ -1,10 +1,9 @@
 import asyncio
-from dataclasses import dataclass, field
-from abc import ABC, abstractmethod
+from dataclasses import dataclass
 import traceback
-from typing import Callable, Awaitable
 from fastapi import APIRouter, WebSocket
 import openai
+from starlette.websockets import WebSocketDisconnect
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
 from config import (
     ANTHROPIC_API_KEY,
@@ -23,6 +22,7 @@ from llm import (
 )
 from typing import (
     Any,
+    Awaitable,
     Callable,
     Coroutine,
     Dict,
@@ -34,22 +34,7 @@ from typing import (
 from openai.types.chat import ChatCompletionMessageParam
 
 from utils import print_prompt_preview
-
-# WebSocket message types
-MessageType = Literal[
-    "chunk",
-    "status",
-    "setCode",
-    "error",
-    "variantComplete",
-    "variantError",
-    "variantCount",
-    "variantModels",
-    "thinking",
-    "assistant",
-    "toolStart",
-    "toolResult",
-]
+from ws import Pipeline, PipelineContext, Middleware, MessageType, WebSocketCommunicator
 from prompts.pipeline import build_prompt_messages
 from prompts.request_parsing import parse_prompt_content, parse_prompt_history
 from prompts.prompt_types import PromptHistoryMessage, Stack, UserTurnInput
@@ -73,158 +58,9 @@ from routes.model_choice_sets import (
 )
 
 # from utils import pprint_prompt
-from ws.constants import APP_ERROR_WEB_SOCKET_CODE  # type: ignore
 
 
 router = APIRouter()
-
-
-@dataclass
-class PipelineContext:
-    """Context object that carries state through the pipeline"""
-
-    websocket: WebSocket
-    ws_comm: "WebSocketCommunicator | None" = None
-    params: Dict[str, Any] = field(default_factory=dict)
-    extracted_params: "ExtractedParams | None" = None
-    prompt_messages: List[ChatCompletionMessageParam] = field(default_factory=list)
-    variant_models: List[Llm] = field(default_factory=list)
-    completions: List[str] = field(default_factory=list)
-    variant_completions: Dict[int, str] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def send_message(self):
-        assert self.ws_comm is not None
-        return self.ws_comm.send_message
-
-    @property
-    def throw_error(self):
-        assert self.ws_comm is not None
-        return self.ws_comm.throw_error
-
-
-class Middleware(ABC):
-    """Base class for all pipeline middleware"""
-
-    @abstractmethod
-    async def process(
-        self, context: PipelineContext, next_func: Callable[[], Awaitable[None]]
-    ) -> None:
-        """Process the context and call the next middleware"""
-        pass
-
-
-class Pipeline:
-    """Pipeline for processing WebSocket code generation requests"""
-
-    def __init__(self):
-        self.middlewares: List[Middleware] = []
-
-    def use(self, middleware: Middleware) -> "Pipeline":
-        """Add a middleware to the pipeline"""
-        self.middlewares.append(middleware)
-        return self
-
-    async def execute(self, websocket: WebSocket) -> None:
-        """Execute the pipeline with the given WebSocket"""
-        context = PipelineContext(websocket=websocket)
-
-        # Build the middleware chain
-        async def start(ctx: PipelineContext):
-            pass  # End of pipeline
-
-        chain = start
-        for middleware in reversed(self.middlewares):
-            chain = self._wrap_middleware(middleware, chain)
-
-        await chain(context)
-
-    def _wrap_middleware(
-        self,
-        middleware: Middleware,
-        next_func: Callable[[PipelineContext], Awaitable[None]],
-    ) -> Callable[[PipelineContext], Awaitable[None]]:
-        """Wrap a middleware with its next function"""
-
-        async def wrapped(context: PipelineContext) -> None:
-            await middleware.process(context, lambda: next_func(context))
-
-        return wrapped
-
-
-class WebSocketCommunicator:
-    """Handles WebSocket communication with consistent error handling"""
-
-    def __init__(self, websocket: WebSocket):
-        self.websocket = websocket
-        self.is_closed = False
-
-    async def accept(self) -> None:
-        """Accept the WebSocket connection"""
-        await self.websocket.accept()
-        print("Incoming websocket connection...")
-
-    async def send_message(
-        self,
-        type: MessageType,
-        value: str | None,
-        variantIndex: int,
-        data: Dict[str, Any] | None = None,
-        eventId: str | None = None,
-    ) -> None:
-        """Send a message to the client with debug logging"""
-        if self.is_closed:
-            return
-
-        # Print for debugging on the backend
-        if type == "error":
-            print(f"Error (variant {variantIndex + 1}): {value}")
-        elif type == "status":
-            print(f"Status (variant {variantIndex + 1}): {value}")
-        elif type == "variantComplete":
-            print(f"Variant {variantIndex + 1} complete")
-        elif type == "variantError":
-            print(f"Variant {variantIndex + 1} error: {value}")
-
-        try:
-            payload: Dict[str, Any] = {"type": type, "variantIndex": variantIndex}
-            if value is not None:
-                payload["value"] = value
-            if data is not None:
-                payload["data"] = data
-            if eventId is not None:
-                payload["eventId"] = eventId
-            await self.websocket.send_json(payload)
-        except (ConnectionClosedOK, ConnectionClosedError):
-            print(f"WebSocket closed by client, skipping message: {type}")
-            self.is_closed = True
-
-    async def throw_error(self, message: str) -> None:
-        """Send an error message and close the connection"""
-        print(message)
-        if not self.is_closed:
-            try:
-                await self.websocket.send_json({"type": "error", "value": message})
-                await self.websocket.close(APP_ERROR_WEB_SOCKET_CODE)
-            except (ConnectionClosedOK, ConnectionClosedError):
-                print("WebSocket already closed by client")
-            self.is_closed = True
-
-    async def receive_params(self) -> Dict[str, Any]:
-        """Receive parameters from the client"""
-        params: Dict[str, Any] = await self.websocket.receive_json()
-        print("Received params")
-        return params
-
-    async def close(self) -> None:
-        """Close the WebSocket connection"""
-        if not self.is_closed:
-            try:
-                await self.websocket.close()
-            except (ConnectionClosedOK, ConnectionClosedError):
-                pass  # Already closed by client
-            self.is_closed = True
 
 
 @dataclass
@@ -666,6 +502,8 @@ class WebSocketSetupMiddleware(Middleware):
 
         try:
             await next_func()
+        except (WebSocketDisconnect, ConnectionClosedOK, ConnectionClosedError):
+            print("Client disconnected, stopping pipeline")
         finally:
             # Always close the WebSocket
             await context.ws_comm.close()

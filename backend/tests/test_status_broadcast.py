@@ -6,9 +6,9 @@ import pytest
 
 from routes.generate_code import (
     ExtractedParams,
-    PipelineContext,
     StatusBroadcastMiddleware,
 )
+from ws import PipelineContext
 
 
 @pytest.mark.asyncio
